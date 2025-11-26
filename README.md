@@ -184,6 +184,23 @@ print(f"Received: {received_message}")
 **Q1: How to generate analog signals?**
 A: The simplest way is using numpy arrays. Use high level (e.g., 1.0) for 1 and low level (e.g., 0.0) for 0. Each bit can be represented by multiple sample points.
 
+For example, to generate a sine wave (analog signal):
+
+```python
+import numpy as np
+
+# Parameters
+duration = 1.0  # seconds
+sample_rate = 1000  # Hz
+frequency = 5  # Hz (5 cycles per second)
+
+# Time array
+t = np.linspace(0, duration, int(duration * sample_rate), endpoint=False)
+
+# Generate sine wave
+analog_signal = np.sin(2 * np.pi * frequency * t)
+```
+
 **Q2: Will noise affect communication?**
 A: Yes! That's why you need to design good modulation schemes and error detection mechanisms. Start with low noise for testing, then gradually increase it.
 
