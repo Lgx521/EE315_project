@@ -2,6 +2,7 @@ import numpy as np
 import time
 import copy
 from cable import Cable
+from WirelessChannel import WirelessChannel
 
 # ============================================================================
 # 全局事件记录器 (SIM_EVENTS)
@@ -76,108 +77,132 @@ class AppLayer:
 # ============================================================================
 # 3. 物理层 (Modem) - 支持多种调制方式
 # ============================================================================
+# ============================================================================
+# 3. 物理层 (Modem) - 修复版 (Improved Sync & Non-coherent Detection)
+# ============================================================================
 class Modem:
-    """
-    支持调制方式: ASK, FSK, BPSK
-    """
     def __init__(self, sample_rate=1000, samples_per_bit=20):
         self.sample_rate = sample_rate
         self.samples_per_bit = samples_per_bit
-        # 同步前导码
+        # 同步前导码 (Preamble)
         self.preamble = [1, 0, 1, 0, 1, 0, 1, 0]
         
-        # 预生成载波 (用于 BPSK 和 FSK)
+        # 预生成时间轴
         self.t = np.linspace(0, 1, self.samples_per_bit, endpoint=False)
         
-        # BPSK 载波: 2 cycles per bit
+        # --- 载波定义 ---
+        # BPSK: 2 cycles per bit
         self.carrier_bpsk = np.sin(2 * np.pi * 2 * self.t)
         
-        # FSK 载波: f1 (Mark/1) = 2 cycles, f2 (Space/0) = 1 cycle
-        self.carrier_f1 = np.sin(2 * np.pi * 2 * self.t)
-        self.carrier_f2 = np.sin(2 * np.pi * 1 * self.t)
-
-    def modulate(self, bits, scheme='ASK'):
-        """调制入口: Bits -> Signal"""
-        tx_bits = self.preamble + bits
-        signal = []
+        # FSK Parameters
+        # Mark (1) = 2 cycles (f1), Space (0) = 1 cycle (f2)
+        self.f1_freq = 2
+        self.f2_freq = 1
         
+        # FSK 发送载波
+        self.carrier_f1 = np.sin(2 * np.pi * self.f1_freq * self.t)
+        self.carrier_f2 = np.sin(2 * np.pi * self.f2_freq * self.t)
+        
+        # FSK 解调参考载波 (正交分量，用于非相干解调)
+        # 即使信号有相位偏移，I^2 + Q^2 也能算准能量
+        self.cos_f1 = np.cos(2 * np.pi * self.f1_freq * self.t)
+        self.sin_f1 = np.sin(2 * np.pi * self.f1_freq * self.t)
+        self.cos_f2 = np.cos(2 * np.pi * self.f2_freq * self.t)
+        self.sin_f2 = np.sin(2 * np.pi * self.f2_freq * self.t)
+
+    def _generate_waveform(self, bits, scheme):
+        """内部辅助: 生成波形"""
+        signal = []
         if scheme == 'ASK':
-            for b in tx_bits:
-                val = 1.0 if b == 1 else -1.0 # 双极性 ASK
+            for b in bits:
+                val = 1.0 if b == 1 else -1.0
                 signal.extend([val] * self.samples_per_bit)
-                
         elif scheme == 'BPSK':
-            for b in tx_bits:
+            for b in bits:
                 wave = self.carrier_bpsk if b == 1 else -self.carrier_bpsk
                 signal.extend(wave)
-                
         elif scheme == 'FSK':
-            for b in tx_bits:
+            for b in bits:
                 wave = self.carrier_f1 if b == 1 else self.carrier_f2
                 signal.extend(wave)
-                
         return np.array(signal)
 
+    def modulate(self, bits, scheme='ASK'):
+        """调制: Bits -> Signal (自动添加前导码)"""
+        tx_bits = self.preamble + bits
+        return self._generate_waveform(tx_bits, scheme)
+
     def demodulate(self, signal, scheme='ASK'):
-        """解调入口: Signal -> Bits"""
+        """解调: Signal -> Bits (包含互相关同步)"""
         if signal is None or len(signal) == 0: return []
         
-        # 1. 简单的能量检测同步
-        threshold = 0.3
-        start_index = 0
-        for i, val in enumerate(signal):
-            if abs(val) > threshold:
-                start_index = i
-                break
+        # 1. 生成该模式下的标准前导码波形 (用于在接收信号中寻找)
+        ref_preamble = self._generate_waveform(self.preamble, scheme)
         
-        # 截取有效信号
-        signal = signal[start_index:]
-        num_bits = len(signal) // self.samples_per_bit
+        # 信号长度检查
+        if len(signal) < len(ref_preamble): return []
+        
+        # 2. 互相关同步 (Cross-Correlation Synchronization)
+        # 这比 threshold 能量检测更精准，能抵抗噪声和衰落
+        corr = np.correlate(signal, ref_preamble, mode='valid')
+        peak_idx = np.argmax(np.abs(corr)) # 找相关性最大的位置
+        
+        # 简单的噪声过滤: 如果相关峰值太小，说明根本没信号
+        if np.abs(corr[peak_idx]) < 1.0: 
+            return []
+            
+        start_index = peak_idx
+        
+        # 截取有效数据段 (跳过前导码)
+        data_signal = signal[start_index + len(ref_preamble):]
+        num_bits = len(data_signal) // self.samples_per_bit
+        
         decoded_bits = []
-
-        # 2. 逐比特解调
+        
+        # 3. 逐比特解调
         for i in range(num_bits):
-            segment = signal[i*self.samples_per_bit : (i+1)*self.samples_per_bit]
-            if len(segment) < self.samples_per_bit: break
+            # 取出一个 symbol 的采样点
+            segment = data_signal[i*self.samples_per_bit : (i+1)*self.samples_per_bit]
             
             bit = 0
             if scheme == 'ASK':
+                # 双极性 ASK，直接看平均值正负
                 bit = 1 if np.mean(segment) > 0 else 0
                 
             elif scheme == 'BPSK':
-                # 相干解调
+                # 相干解调: 乘载波求和
+                # 注意: 这里还没处理 180度相位反转的问题，下面会统一处理
                 score = np.sum(segment * self.carrier_bpsk)
                 bit = 1 if score > 0 else 0
                 
             elif scheme == 'FSK':
-                # 相关解调
-                s1 = np.sum(segment * self.carrier_f1)
-                s0 = np.sum(segment * self.carrier_f2)
-                bit = 1 if s1 > s0 else 0
+                # 非相干解调 (能量检测): 
+                # 计算信号在 f1 和 f2 频率上的能量 (Energy = I^2 + Q^2)
+                # 这种方法不需要相位对齐，非常稳健
+                
+                # f1 能量
+                e_f1 = (np.sum(segment * self.cos_f1))**2 + (np.sum(segment * self.sin_f1))**2
+                # f2 能量
+                e_f2 = (np.sum(segment * self.cos_f2))**2 + (np.sum(segment * self.sin_f2))**2
+                
+                bit = 1 if e_f1 > e_f2 else 0
                 
             decoded_bits.append(bit)
             
-        # 3. 移除前导码
-        if len(decoded_bits) > len(self.preamble):
-            return decoded_bits[len(self.preamble):]
-        return []
+        # 4. BPSK 相位模糊修正 (Phase Ambiguity Correction)
+        # 如果是 BPSK，我们可能锁定了反相的载波，导致所有 bit 都反了
+        # 我们解调出的数据里也包含 "后续部分" 的前导码吗？不，我们上面已经跳过了前导码
+        # 等等，如果刚才同步时，互相关峰值是负的，说明信号本身就是反相的！
+        
+        if scheme == 'BPSK':
+            # 检查互相关峰值的符号
+            # 如果峰值是负数，说明收到的前导码和参考前导码完全反相
+            if corr[peak_idx] < 0:
+                # 翻转所有解调出的 bit
+                decoded_bits = [1 - b for b in decoded_bits]
 
-# ============================================================================
-# 4. 无线信道 (WirelessChannel) [Bonus]
-# ============================================================================
-class WirelessChannel(Cable):
-    """
-    模拟无线信道，增加瑞利衰落 (Rayleigh Fading)
-    """
-    def transmit(self, signal):
-        # 1. 父类基础传输 (衰减 + 加性高斯白噪声)
-        base_signal = super().transmit(signal)
-        
-        # 2. 模拟多径效应导致的瑞利衰落
-        fading_factor = np.random.rayleigh(scale=0.9)
-        fading_factor = np.clip(fading_factor, 0.2, 1.5)
-        
-        return base_signal * fading_factor
+        return decoded_bits
+
 
 # ============================================================================
 # 5. 网络层 (Packet & Host)
@@ -289,7 +314,7 @@ class Host:
             record_event(current_time, self.address, "Receive", packet.seq, packet.type)
 
             if packet.type == 'ACK':
-                print(f"[Host {self.address}] 🆗 Received ACK for SEQ={packet.seq}")
+                print(f"[Host {self.address}]   Received ACK for SEQ={packet.seq}")
                 if packet.seq in self.pending_acks:
                     del self.pending_acks[packet.seq]
             
@@ -298,7 +323,7 @@ class Host:
                 if packet_id in self.received_seqs:
                     print(f"[Host {self.address}] ⚠️ Duplicate SEQ={packet.seq}, resending ACK.")
                 else:
-                    print(f"[Host {self.address}] ✅ RECEIVED SEQ={packet.seq}: '{packet.payload}'")
+                    print(f"[Host {self.address}]   RECEIVED SEQ={packet.seq}: '{packet.payload}'")
                     self.received_seqs.add(packet_id)
                     app_data = packet.payload
                     # 简单触发一下应用层
@@ -319,7 +344,7 @@ class Host:
         retransmit_data = []
         for seq, info in self.pending_acks.items():
             if current_time - info['sent_time'] > self.timeout_interval:
-                print(f"[Host {self.address}] ⏳ Timeout for SEQ={seq}. Retransmitting...")
+                print(f"[Host {self.address}]   Timeout for SEQ={seq}. Retransmitting...")
                 record_event(current_time, self.address, "Timeout", seq, "EVENT")
                 
                 info['sent_time'] = current_time
@@ -410,5 +435,5 @@ def run_simulation(target_scheme='ASK'):
 
 if __name__ == "__main__":
     # 默认作为独立脚本运行时，跑一遍 ASK
-    run_simulation('ASK')
+    run_simulation('FSK')
     print(f"\nSimulation finished with {len(SIM_EVENTS)} events recorded.")
