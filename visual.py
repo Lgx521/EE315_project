@@ -1,86 +1,82 @@
 import matplotlib.pyplot as plt
-import main  # 直接导入 main 模块
+import copy
+import main
 
-def visualize_real_logic():
-    print("🚀 启动可视化：正在运行 main.py 的真实业务逻辑...")
+def visualize_separate_schemes():
+    print("🚀 启动对比可视化引擎 (Fixed Causality)...")
     
-    # 1. 运行仿真 (这一步会执行 main.py 中的 run_simulation)
-    # 所有的 Print 输出都会显示在终端，同时数据会被记录到 main.SIM_EVENTS
-    main.run_simulation()
+    schemes = ['ASK', 'FSK', 'BPSK']
+    colors = {'ASK': 'blue', 'FSK': 'green', 'BPSK': 'purple'}
     
-    events = main.SIM_EVENTS
+    fig, axes = plt.subplots(3, 1, figsize=(12, 18))
+    plt.subplots_adjust(hspace=0.4)
+    Y_CLIENT, Y_SERVER = 3, 1
     
-    if not events:
-        print("❌ 警告：没有捕获到任何事件。请检查 main.py 是否正常运行。")
-        return
+    for i, scheme in enumerate(schemes):
+        ax = axes[i]
+        color = colors[scheme]
+        
+        main.run_simulation(target_scheme=scheme)
+        events = copy.deepcopy(main.SIM_EVENTS)
+        
+        ax.set_title(f"Protocol Sequence - Modulation: {scheme}", fontsize=14, fontweight='bold', color=color)
+        ax.set_ylim(0, 4)
+        ax.set_xlim(0, 12)
+        ax.set_yticks([Y_SERVER, Y_CLIENT])
+        ax.set_yticklabels(['Host 2 (Server)', 'Host 1 (Client)'], fontweight='bold')
+        
+        # 轨道
+        ax.axhline(Y_CLIENT, color=color, alpha=0.1, linewidth=2)
+        ax.axhline(Y_SERVER, color=color, alpha=0.1, linewidth=2)
+        ax.axvspan(4.0, 6.0, facecolor='red', alpha=0.05)
+        ax.text(5.0, 3.8, "Loss Zone", ha='center', color='red', fontsize=8)
 
-    print(f"📊 捕获到 {len(events)} 个事件，正在绘图...")
+        for e in events:
+            t = e['time']
+            host = e['host']
+            action = e['action']
+            status = e['status']
+            ptype = e['type']
+            seq = e['seq']
+            
+            y_pos = Y_CLIENT if host == 1 else Y_SERVER
+            
+            # 绘制 Timeout
+            if action == 'Timeout':
+                ax.plot(t, y_pos, marker='D', color='orange', markersize=10, zorder=10)
+                ax.text(t, y_pos + 0.4, "Timeout", ha='center', color='orange', fontsize=8, fontweight='bold')
+                continue
 
-    # 2. 绘图逻辑
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    y_client = 3
-    y_server = 1
-    
-    ax.set_ylim(0, 4)
-    ax.set_xlim(0, 12)
-    ax.set_yticks([])
-    ax.set_title("Real-Time Protocol Sequence (Visualizing main.py Execution)")
-    
-    # 画轨道
-    ax.axhline(y_client, color='blue', linestyle='-', alpha=0.3)
-    ax.text(0, y_client + 0.2, 'Host 1 (Client)', fontweight='bold', color='blue')
-    ax.axhline(y_server, color='green', linestyle='-', alpha=0.3)
-    ax.text(0, y_server + 0.2, 'Host 2 (Server)', fontweight='bold', color='green')
-    
-    # 画事件
-    for e in events:
-        t = e['time']
-        h = e['host']
-        action = e['action']
-        status = e['status']
-        ptype = e['type']
-        seq = e['seq']
-        
-        y = y_client if h == 1 else y_server
-        
-        # 绘制 Timeout
-        if action == "Timeout":
-            ax.plot(t, y, marker='D', color='orange', markersize=12, zorder=10)
-            ax.text(t, y + 0.5, f"Timeout\nSeq={seq}", ha='center', color='orange', fontsize=9, fontweight='bold')
-            continue
+            # 绘制节点
+            node_color = color if ptype == 'DATA' else 'gray'
+            if status == 'Lost': node_color = 'red'
+            marker = 'X' if status == 'Lost' else 'o'
+            
+            ax.plot(t, y_pos, marker=marker, color=node_color, markersize=8)
+            
+            lbl = f"{action} {ptype}\nSeq={seq}"
+            offset = 0.3 if host == 1 else -0.4
+            ax.text(t, y_pos + offset, lbl, ha='center', fontsize=8, color=node_color)
+            
+            # 绘制箭头
+            if action == "Send":
+                target_y = Y_SERVER if host == 1 else Y_CLIENT
+                # 传播时间设为 0.5 (匹配 main.py 中的设定)
+                arrow_dx = 0.5 
+                
+                if status == 'Success':
+                    ax.annotate("", 
+                                xy=(t + arrow_dx, target_y), xytext=(t, y_pos),
+                                arrowprops=dict(arrowstyle="->", color=node_color, lw=1.5, alpha=0.6))
+                elif status == 'Lost':
+                    mid_y = (y_pos + target_y) / 2
+                    ax.annotate("", 
+                                xy=(t + 0.3, mid_y), xytext=(t, y_pos),
+                                arrowprops=dict(arrowstyle="-[", color='red', lw=1.5))
+                    ax.text(t + 0.3, mid_y, " X", color='red', fontweight='bold')
 
-        # 绘制 Send / Receive
-        color = 'blue' if ptype == 'DATA' else 'green'
-        if status == 'Lost': color = 'red'
-        
-        marker = 'o'
-        if status == 'Lost': marker = 'x'
-        
-        # 如果是 Receive，稍微画晚一点/偏移一点，避免重叠
-        # 但在时序图上，通常 Send 和 Receive 是有连线的
-        # 这里简化处理：只画点
-        
-        ax.plot(t, y, marker=marker, color=color, markersize=10)
-        
-        label_y = y + 0.3 if h == 1 else y - 0.4
-        label = f"{action} {ptype}\nSeq={seq}"
-        if status == 'Lost': label += "\n(Dropped)"
-        
-        ax.text(t, label_y, label, ha='center', fontsize=8, color=color)
-        
-        # 绘制连线 (仅针对成功的 Send)
-        if action == "Send" and status == "Success":
-            # 查找匹配的 Receive 事件 (简单起见，画个指向对面的箭头)
-            target_y = y_server if h == 1 else y_client
-            ax.arrow(t, y, 0.5, target_y - y, head_width=0.1, length_includes_head=True, color=color, alpha=0.2)
-        elif action == "Send" and status == "Lost":
-             ax.arrow(t, y, 0.5, -0.5, head_width=0.1, color='red', alpha=0.5)
-
-    ax.set_xlabel("Simulation Time (s)")
-    ax.grid(True, axis='x', linestyle='--', alpha=0.3)
     plt.tight_layout()
     plt.show()
 
 if __name__ == "__main__":
-    visualize_real_logic()
+    visualize_separate_schemes()
