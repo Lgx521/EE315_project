@@ -360,10 +360,9 @@ class Host:
 # ============================================================================
 
 def run_simulation():
-    print("="*60)
-    print("Full Stack Network Simulation (Instrumented for Visualization)")
-    print("Levels 1, 2, 3 + Visualization Support")
-    print("="*60)
+    print("="*20)
+    print(" Network Simulation")
+    print("="*20)
     
     # 每次运行前清空全局事件记录
     global SIM_EVENTS
@@ -408,14 +407,15 @@ def run_simulation():
         
         # --- [丢包逻辑控制中心] ---
         # 如果你想取消丢包，将下方条件改为 False
-        # is_loss_period = False 
+        is_loss_flag = True 
         is_loss_period = (4.0 < current_t < 6.0)
         
-        if is_loss_period:
-            print(f"   >>> [CHANNEL FAILURE] Signal lost! (Time={current_t})")
-            # 记录丢包事件 [Visual Log]
-            record_event(current_t, sender.address, "Send", seq_num, p_type, status="Lost")
-            return 
+        if is_loss_flag:
+            if is_loss_period:
+                print(f"   >>> [CHANNEL FAILURE] Signal lost! (Time={current_t})")
+                # 记录丢包事件 [Visual Log]
+                record_event(current_t, sender.address, "Send", seq_num, p_type, status="Lost")
+                return 
 
         # 记录成功发送事件 [Visual Log]
         record_event(current_t, sender.address, "Send", seq_num, p_type, status="Success")
