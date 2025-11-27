@@ -1,6 +1,6 @@
 import numpy as np
-import struct
 import time
+import copy
 from cable import Cable
 
 # ============================================================================
@@ -13,7 +13,6 @@ class Utils:
         """将字符串转换为比特列表 [0, 1, ...]"""
         result = []
         for char in s:
-            # 获取字符的ASCII值，转为8位二进制
             bin_val = bin(ord(char))[2:].zfill(8)
             result.extend([int(b) for b in bin_val])
         return result
@@ -31,282 +30,316 @@ class Utils:
 
     @staticmethod
     def calculate_crc(bits):
-        """简单的CRC-8校验模拟 (用于演示)"""
-        # 这里使用简单的求和校验作为替代，演示原理
-        # 实际工程应使用多项式除法
+        """简单CRC-8校验"""
         checksum = sum(bits) % 256
         return [int(b) for b in bin(checksum)[2:].zfill(8)]
 
 # ============================================================================
-# 2. 物理层 (Physical Layer - Modem)
+# 2. 物理层 (Modem)
 # ============================================================================
 
 class Modem:
-    """
-    调制解调器
-    负责：比特流 <---> 模拟信号
-    """
     def __init__(self, sample_rate=100, samples_per_bit=10):
         self.sample_rate = sample_rate
         self.samples_per_bit = samples_per_bit
-        # 简单幅移键控 (ASK): 1 -> 1.0V, 0 -> -1.0V (双极性更好抗噪)
         self.high_level = 1.0
         self.low_level = -1.0
-        
-        # 扩频/同步头：用于帮助解调器找到信号开始的位置
-        # 发送 10101010 作为前导码
         self.preamble = [1, 0, 1, 0, 1, 0, 1, 0] 
 
     def modulate(self, bits):
-        """[Level 1] 调制: 将比特流转换为模拟波形"""
-        # 1. 添加前导码 (Preamble) 以便接收端同步
         tx_bits = self.preamble + bits
-        
         signal = []
         for b in tx_bits:
             val = self.high_level if b == 1 else self.low_level
-            # 每个比特重复 samples_per_bit 次 (矩形波)
             signal.extend([val] * self.samples_per_bit)
-            
         return np.array(signal)
 
     def demodulate(self, signal):
-        """[Level 1] 解调: 将模拟波形恢复为比特流"""
-        # 1. 简单的能量检测或阈值判决
-        # 由于 Cable 会引入延迟和噪声，我们需要先找到信号的"头"
-        
-        # 简单处理：我们假设信号足够强，直接按阈值归一化为 0/1
-        # 在真实场景中需要做相关性分析(Correlation)来找前导码
-        
-        digital_signal = []
         threshold = (self.high_level + self.low_level) / 2
         
-        # 逐点判决
-        raw_bits = [1 if s > threshold else 0 for s in signal]
+        # 简单同步：寻找信号能量起始点（简化处理）
+        # 实际应使用相关性计算
+        start_index = 0
+        for i, val in enumerate(signal):
+            if abs(val) > 0.5: # 简单的噪声门限
+                start_index = i
+                break
         
-        # 2. 下采样 (Downsampling) - 取每个比特周期的中间点
-        # 这里我们做一个简单的同步扫描：寻找前导码模式
+        # 稍微向后偏移一点以跳过不稳定区域
+        signal = signal[start_index:]
         
-        # 将原始比特流转为字符串以便查找
-        raw_str = "".join(map(str, raw_bits))
-        preamble_str = "".join(map(str, self.preamble))
-        
-        # 扩频后的前导码大概长度
-        # 注意：这里为了简化，我们假设没有严重的频率偏移，直接按步长采样
-        decoded_bits = []
-        
-        # 简单的积分判决：每 samples_per_bit 个点取平均
         num_bits = len(signal) // self.samples_per_bit
+        decoded_bits = []
         
         for i in range(num_bits):
             start = i * self.samples_per_bit
             end = start + self.samples_per_bit
             segment = signal[start:end]
+            if len(segment) == 0: break
             avg = np.mean(segment)
             decoded_bits.append(1 if avg > threshold else 0)
             
-        # 3. 移除前导码
-        # 寻找前导码的结束位置。这里简化处理：直接切片
-        # 在高噪声下，应该使用滑动窗口匹配前导码
-        if len(decoded_bits) > len(self.preamble):
-            return decoded_bits[len(self.preamble):]
+        # 移除前导码 (Preamble)
+        # 这里进行简单的模式匹配
+        preamble_len = len(self.preamble)
+        if len(decoded_bits) > preamble_len:
+            # 检查前几个比特是否大概符合前导码（简化：直接切除）
+            return decoded_bits[preamble_len:]
         else:
             return []
 
 # ============================================================================
-# 3. 网络层与链路层 (Host)
+# 3. 网络层 (Packet & Host)
 # ============================================================================
 
 class Packet:
-    """定义数据包结构"""
-    def __init__(self, src, dst, payload_str, type='DATA'):
-        self.src = src # 源地址 (int)
-        self.dst = dst # 目的地址 (int)
-        self.type = type # DATA 或 ACK
+    """
+    更新后的数据包结构：
+    [SRC(8)] [DST(8)] [TYPE(8)] [SEQ(8)] [LEN(8)] [PAYLOAD...] [CRC(8)]
+    增加了 SEQ 字段
+    """
+    def __init__(self, src, dst, payload_str, type='DATA', seq=0):
+        self.src = src
+        self.dst = dst
+        self.type = type      # 'DATA' or 'ACK'
+        self.seq = seq        # 序列号
         self.payload = payload_str
 
     def to_bits(self):
-        """
-        封包格式: [SRC(8bit)] [DST(8bit)] [TYPE(8bit)] [LEN(8bit)] [PAYLOAD] [CRC(8bit)]
-        """
         src_bits = [int(b) for b in bin(self.src)[2:].zfill(8)]
         dst_bits = [int(b) for b in bin(self.dst)[2:].zfill(8)]
         
         type_map = {'DATA': 1, 'ACK': 2}
         type_bits = [int(b) for b in bin(type_map.get(self.type, 0))[2:].zfill(8)]
         
+        # 序列号 (8 bits)
+        seq_bits = [int(b) for b in bin(self.seq % 256)[2:].zfill(8)]
+        
         payload_bits = Utils.str_to_bits(self.payload)
-        len_bits = [int(b) for b in bin(len(payload_bits) // 8)[2:].zfill(8)] # 长度以字节为单位
+        len_bits = [int(b) for b in bin(len(payload_bits) // 8)[2:].zfill(8)]
         
-        header = src_bits + dst_bits + type_bits + len_bits
+        header = src_bits + dst_bits + type_bits + seq_bits + len_bits
         data = header + payload_bits
-        
-        # [Level 3] 添加CRC校验
         crc_bits = Utils.calculate_crc(data)
         
         return data + crc_bits
 
     @staticmethod
     def from_bits(bits):
-        """解包"""
-        if len(bits) < 40: # 最小头部长度 5 bytes * 8
+        # 头部现在是 5 bytes (40 bits) + CRC 1 byte
+        if len(bits) < 48: 
             return None
         
-        # 提取各个字段
         def bits_to_int(b): return int("".join(map(str, b)), 2)
         
         src = bits_to_int(bits[0:8])
         dst = bits_to_int(bits[8:16])
         msg_type_int = bits_to_int(bits[16:24])
-        length = bits_to_int(bits[24:32])
+        seq = bits_to_int(bits[24:32]) # 读取序列号
+        length = bits_to_int(bits[32:40])
         
         msg_type = 'DATA' if msg_type_int == 1 else 'ACK'
         
-        payload_end = 32 + length * 8
-        payload_bits = bits[32:payload_end]
+        payload_start = 40
+        payload_end = payload_start + length * 8
+        
+        if payload_end + 8 > len(bits): # 长度检查
+            return None
+
+        payload_bits = bits[payload_start:payload_end]
         received_crc = bits[payload_end:payload_end+8]
         
-        # [Level 3] 校验 CRC
+        # CRC 校验
         calculated_crc = Utils.calculate_crc(bits[0:payload_end])
         if received_crc != calculated_crc:
-            print(f"[ERROR] CRC Check Failed! Data Corrupted.")
-            return None
+            return None # 校验失败
             
         payload_str = Utils.bits_to_str(payload_bits)
-        return Packet(src, dst, payload_str, msg_type)
+        return Packet(src, dst, payload_str, msg_type, seq)
 
 
 class Host:
-    """
-    网络主机
-    实现 Level 2 (寻址) 和 Level 3 (可靠传输)
-    """
     def __init__(self, address, cable):
         self.address = address
         self.cable = cable
         self.modem = Modem()
-        self.received_buffer = []
+        
+        # --- 可靠传输状态 ---
+        self.next_seq = 0            # 下一个发送的序列号
+        self.received_seqs = set()   # 已处理的序列号（用于去重）
+        
+        # 待确认列表: { seq_num: {'packet': PacketObj, 'sent_time': timestamp} }
+        self.pending_acks = {}       
+        self.timeout_interval = 3.0  # 超时时间 (模拟时间单位)
 
-    def send(self, target_address, message, reliable=False):
-        """发送消息"""
-        print(f"\n[Host {self.address}] Sending to {target_address}: '{message}'")
+    def send(self, target_address, message, current_time, reliable=True):
+        """发送消息，如果 reliable=True，则加入重传队列"""
+        print(f"[Host {self.address}] Sending SEQ={self.next_seq} to {target_address}: '{message}'")
         
-        # 1. 封装数据包
-        packet = Packet(self.address, target_address, message, 'DATA')
+        packet = Packet(self.address, target_address, message, 'DATA', seq=self.next_seq)
+        
+        # 1. 记录到待确认列表 (Level 3: Retransmission)
+        if reliable:
+            self.pending_acks[self.next_seq] = {
+                'packet': packet,
+                'sent_time': current_time
+            }
+            self.next_seq += 1 # 准备下一个序列号
+            
+        # 2. 物理发送
+        return self._transmit_packet(packet)
+
+    def _transmit_packet(self, packet):
+        """辅助函数：将包转为信号并返回"""
         bits = packet.to_bits()
-        
-        # 2. 调制
-        analog_signal = self.modem.modulate(bits)
-        
-        # 3. 物理传输 (通过 Cable)
-        # 注意：在真实网络中，这里只是把信号放到介质上。
-        # 为了模拟多主机环境，我们假设 Cable 是一个共享总线。
-        # 这里我们模拟"广播"，所有连接到这个 Cable 的主机都会收到信号。
-        # 实际上 Cable 类是点对点的，所以我们通过外部逻辑把信号传给所有其他主机。
-        return analog_signal
+        return self.modem.modulate(bits)
 
     def receive(self, analog_signal):
-        """接收并处理信号"""
-        # 1. 解调
+        """接收处理，返回可能需要立即发送的信号（如ACK）"""
         bits = self.modem.demodulate(analog_signal)
-        if not bits:
-            return
+        if not bits: return None
             
-        # 2. 解包
         packet = Packet.from_bits(bits)
-        if packet is None:
-            return # CRC失败或格式错误
+        if packet is None: return None # CRC 失败
 
-        # 3. [Level 2] 地址过滤
         if packet.dst == self.address:
-            if packet.type == 'DATA':
-                print(f"[Host {self.address}] ✅ RECEIVED from {packet.src}: '{packet.payload}'")
-                # [Level 3] 自动发送 ACK
-                self.send_ack(packet.src)
-            elif packet.type == 'ACK':
-                print(f"[Host {self.address}] 🆗 ACK Received from {packet.src}")
-        else:
-            # 这里的 Debug 信息用于证明地址过滤在工作
-            # print(f"[Host {self.address}] Ignored packet for {packet.dst}")
-            pass
+            # --- 处理 ACK 包 ---
+            if packet.type == 'ACK':
+                print(f"[Host {self.address}] 🆗 Received ACK for SEQ={packet.seq}")
+                if packet.seq in self.pending_acks:
+                    del self.pending_acks[packet.seq] # 移除待确认项，停止计时
+                return None
 
-    def send_ack(self, target_address):
-        """[Level 3] 发送 ACK"""
-        packet = Packet(self.address, target_address, "ACK", 'ACK')
-        bits = packet.to_bits()
-        signal = self.modem.modulate(bits)
-        # 在这里我们简化处理，假设ACK通过某种“魔法”回传，
-        # 或者在主循环中显式调用 cable 传输。
-        # 为了演示代码结构，我们仅仅打印构造好了ACK
-        # 实际传输逻辑在 main 的总线模拟中处理
-        return signal
+            # --- 处理 DATA 包 ---
+            elif packet.type == 'DATA':
+                # Level 3: 避免重复处理
+                packet_id = (packet.src, packet.seq)
+                if packet_id in self.received_seqs:
+                    print(f"[Host {self.address}] ⚠️ Duplicate SEQ={packet.seq} received, resending ACK.")
+                else:
+                    print(f"[Host {self.address}] ✅ RECEIVED SEQ={packet.seq}: '{packet.payload}'")
+                    self.received_seqs.add(packet_id)
+
+                # Level 3: 发送 ACK
+                # ACK 的序列号应与收到的 DATA 序列号一致
+                ack_packet = Packet(self.address, packet.src, "ACK", 'ACK', seq=packet.seq)
+                return self._transmit_packet(ack_packet)
+                
+        return None
+
+    def check_timeouts(self, current_time):
+        """
+        [Level 3] 检查超时并重传
+        返回：需要重传的信号列表
+        """
+        retransmit_signals = []
+        for seq, info in self.pending_acks.items():
+            if current_time - info['sent_time'] > self.timeout_interval:
+                print(f"[Host {self.address}] ⏳ Timeout for SEQ={seq}. Retransmitting...")
+                # 重传逻辑
+                info['sent_time'] = current_time # 重置计时器
+                signal = self._transmit_packet(info['packet'])
+                retransmit_signals.append(signal)
+        return retransmit_signals
 
 # ============================================================================
-# 4. 主程序与测试场景
+# 4. 模拟主循环 (Simulation Loop)
 # ============================================================================
 
 def run_simulation():
     print("="*60)
-    print("Data Communication Simulation (Level 1, 2, 3)")
+    print("Network Simulation: Reliability, Sequence Numbers & Retransmission")
     print("="*60)
 
-    # 初始化物理介质
-    # 增加一点噪声来测试鲁棒性
-    shared_cable = Cable(length=50, attenuation=0.01, noise_level=0.1, debug_mode=False)
+    # 创建带噪声的信道 (Level 1)
+    cable = Cable(length=50, attenuation=0.0, noise_level=0.1)
     
-    # 初始化主机
-    host_A = Host(address=1, cable=shared_cable)
-    host_B = Host(address=2, cable=shared_cable)
-    host_C = Host(address=3, cable=shared_cable) # 用于测试地址过滤
+    host_A = Host(address=10, cable=cable)
+    host_B = Host(address=20, cable=cable)
     
-    hosts = [host_A, host_B, host_C]
+    # 模拟时间
+    sim_time = 0.0
     
-    def simulate_bus_transmission(sender, signal):
-        """模拟共享总线：一个发，大家收"""
-        print(f"--- Transmission on Cable (Length: {len(signal)} samples) ---")
-        # 信号通过线缆（增加噪声和衰减）
-        transmitted_signal = shared_cable.transmit(signal)
+    # 辅助函数：模拟总线上的信号传播
+    def propagate_signal(sender, signal):
+        if signal is None: return
+        # 1. 信号通过 Cable
+        rx_signal = cable.transmit(signal)
         
-        # 广播给除了发送者以外的所有人
-        for h in hosts:
-            if h.address != sender.address:
-                # 尝试接收
-                response = h.receive(transmitted_signal)
-                # 如果接收者回发了 ACK (Level 3)，我们需要处理这个ACK
-                # 这里为了简单，如果 receive 返回了信号(ACK)，我们可以递归调用传输
-                # 但这会导致死循环如果逻辑不对，暂不递归处理 ACK 的传输
-                
-    
-    # --- 测试场景 1: Level 1 (基本通信) & Level 2 (寻址) ---
-    print("\n>>> Scenario 1: Host A sends to Host B")
-    signal = host_A.send(target_address=2, message="Hello World!")
-    simulate_bus_transmission(host_A, signal)
+        # 2. 模拟丢包 (为了测试重传，我们随机丢弃一些信号)
+        # 这里我们硬编码：如果是特定的时间点，强制“信号丢失”（不传给接收方）
+        # 假设我们在 Time=5.0 时的信号被丢弃了
+        if 4.0 < sim_time < 6.0:
+            print(f"   >>> [CHANNEL FAILURE] Signal lost in transmission! (Time={sim_time})")
+            return 
 
-    # --- 测试场景 2: Level 2 (地址过滤) ---
-    print("\n>>> Scenario 2: Host A sends to Host C (Host B should ignore)")
-    signal = host_A.send(target_address=3, message="Secret for C")
-    simulate_bus_transmission(host_A, signal)
+        # 3. 接收方处理
+        receiver = host_B if sender == host_A else host_A
+        response_signal = receiver.receive(rx_signal)
+        
+        # 4. 如果接收方回发了信号 (ACK)，递归传播
+        if response_signal is not None:
+            propagate_signal(receiver, response_signal)
 
-    # --- 测试场景 3: Level 1 (长消息) & Level 3 (CRC校验) ---
-    print("\n>>> Scenario 3: Host B sends long message to A")
-    long_msg = "Data Comm is fun when you build it from scratch!"
-    signal = host_B.send(target_address=1, message=long_msg)
-    simulate_bus_transmission(host_B, signal)
+    # --- 场景 1: 正常传输 ---
+    print(f"\n[Time={sim_time}] Scenario 1: Normal Transmission")
+    signal = host_A.send(20, "Hello B", current_time=sim_time)
+    propagate_signal(host_A, signal)
     
-    # --- 测试场景 4: 模拟高噪声导致 CRC 失败 ---
-    print("\n>>> Scenario 4: High Noise Interference")
-    bad_cable = Cable(length=100, attenuation=0.5, noise_level=0.8) # 高噪声
+    # 推进时间
+    sim_time += 2.0 
     
-    # 手动制造一次传输
-    print("[Host 1] Sending critical data...")
-    packet = Packet(1, 2, "Critical Data", 'DATA')
-    bits = packet.to_bits()
-    modem = Modem()
-    raw_signal = modem.modulate(bits)
-    noisy_signal = bad_cable.transmit(raw_signal)
+    # --- 场景 2: 模拟丢包与超时重传 ---
+    print(f"\n[Time={sim_time}] Scenario 2: Packet Loss & Retransmission")
+    # 这次发送的数据将在 propagate_signal 中被“丢弃” (因为 sim_time=5.0 在 4.0-6.0 区间)
+    signal = host_A.send(20, "This will be lost", current_time=sim_time) # SEQ应该增加了
+    propagate_signal(host_A, signal) # 这里会触发 CHANNEL FAILURE
     
-    print("[Host 2] Attempting to receive noisy signal...")
-    host_B.receive(noisy_signal) # 应该打印错误或什么都不显示（因为CRC失败）
+    # 此时 Host A 的 pending_acks 里仍然有这个包
+    print(f"   Host A pending ACKs: {list(host_A.pending_acks.keys())}")
+    
+    # 推进时间 (模拟等待)
+    print("\n... Ticking time forward ...")
+    sim_time += 4.0 # 现在 Time = 9.0，超过了 timeout (3.0)
+    
+    # 检查超时
+    print(f"[Time={sim_time}] Checking timeouts...")
+    # Host A 检查超时，应该返回重传信号
+    retry_signals = host_A.check_timeouts(sim_time)
+    
+    for sig in retry_signals:
+        # 重传的信号应该能成功 (因为现在时间不在丢包区间)
+        propagate_signal(host_A, sig)
+
+    # --- 场景 3: 模拟 ACK 丢失 (导致重复包) ---
+    print(f"\n[Time={sim_time}] Scenario 3: ACK Loss (Duplicate Handling)")
+    # 我们这里手动模拟：B 收到了，但 B 发回的 ACK 在路上丢了
+    # 为了演示，我们手动操作 Host B 接收，并拦截其 ACK
+    
+    msg = "ACK will be lost"
+    packet = Packet(10, 20, msg, 'DATA', seq=host_A.next_seq)
+    # Host A 记录发送
+    host_A.pending_acks[host_A.next_seq] = {'packet': packet, 'sent_time': sim_time}
+    host_A.next_seq += 1
+    
+    # 手动让 B 接收 (不经过 propagate_signal，确保 B 收到)
+    print(f"[Host 10] Sending SEQ={packet.seq} (Simulating ACK loss)")
+    tx_signal = host_A._transmit_packet(packet)
+    rx_signal = cable.transmit(tx_signal) # 物理传输
+    ack_signal = host_B.receive(rx_signal) # B 收到并产生 ACK
+    
+    print("   >>> [CHANNEL FAILURE] ACK lost on the way back to A!")
+    # 我们故意不把 ack_signal 传回给 A
+    
+    # 时间流逝，A 超时重传
+    sim_time += 4.0
+    print(f"\n[Time={sim_time}] A timeouts and retransmits SEQ={packet.seq}")
+    retry_signals = host_A.check_timeouts(sim_time)
+    
+    for sig in retry_signals:
+        # A 重传相同的数据包
+        # B 应该检测到重复，不向上层递交，但重发 ACK
+        propagate_signal(host_A, sig)
 
 if __name__ == "__main__":
     run_simulation()
