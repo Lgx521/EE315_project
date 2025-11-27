@@ -202,6 +202,7 @@ def visualize_protocol_timeline():
     ax.grid(True, axis='x', linestyle='--', alpha=0.3)
     
     print("✅ 绘图完成。")
+    plt.savefig('retransmission.png',dpi=320)
     plt.show()
 
 def visualize_physical_layer():
