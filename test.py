@@ -1,200 +1,183 @@
+import unittest
 import numpy as np
-import matplotlib.pyplot as plt
 from cable import Cable
-# 引入你保存的 main.py 中的类
-try:
-    from main import Host, Packet, Utils, Modem
-except ImportError:
-    print("错误：找不到 main.py。请确保你将之前的完整代码保存为 main.py")
-    exit()
+# 导入 main.py 中的核心类
+from main import Host, Packet, AppLayer, Utils, Modem
 
-def plot_modulation_analysis():
-    """
-    可视化 1: 深入分析物理层
-    展示：比特流 -> 调制信号 -> 噪声信号 -> 解调判决
-    """
-    print("正在生成物理层波形分析图...")
+class TestAppLayer(unittest.TestCase):
+    """测试 Level 3 扩展: 应用层协议"""
     
-    # 1. 准备数据
-    message = "Hi!" # 短消息方便绘图
-    host = Host(1, None) # 只需要 Modem 功能，不需要真实的 Cable 连接
-    
-    # 手动构建数据包和比特流
-    packet = Packet(1, 2, message, 'DATA', seq=0)
-    bits = packet.to_bits()
-    
-    # 我们只截取前 40 个比特进行详细展示 (大约是头部的一部分)，避免图太长
-    display_bits = bits[:40] 
-    
-    # 2. 调制 (Modulation)
-    modem = Modem(samples_per_bit=10) # 假设 main.py 中 samples_per_bit=10
-    clean_signal = modem.modulate(display_bits)
-    
-    # 3. 模拟信道 (Channel)
-    # 创建一个噪声较大的环境来展示鲁棒性
-    cable = Cable(length=100, attenuation=0.1, noise_level=0.3)
-    noisy_signal = cable.transmit(clean_signal) # 注意：Cable 可能会加上延迟或衰减
-    
-    # 4. 绘图
-    plt.figure(figsize=(15, 10))
-    plt.subplots_adjust(hspace=0.4)
-    
-    # --- 子图 1: 原始数字比特流 ---
-    plt.subplot(3, 1, 1)
-    plt.title(f"1. Digital Bit Stream (First {len(display_bits)} bits of Packet Header)")
-    # 画阶梯图表示 0 和 1
-    x_bits = np.arange(len(display_bits))
-    plt.step(x_bits, display_bits, where='mid', color='black', linewidth=2, label='Logic Bits')
-    plt.ylim(-0.5, 1.5)
-    plt.yticks([0, 1])
-    plt.grid(True, alpha=0.3)
-    for i, b in enumerate(display_bits):
-        plt.text(i, b + 0.1, str(b), ha='center', fontsize=8, color='blue')
-    plt.legend(loc='upper right')
+    def test_protocol_formatting(self):
+        """测试请求和响应的格式化"""
+        # 测试请求生成
+        req = AppLayer.create_request("GET", "/index.html")
+        self.assertEqual(req, "GET /index.html")
+        
+        # 测试响应生成
+        res = AppLayer.create_response("200", "OK")
+        self.assertEqual(res, "200 OK")
 
-    # --- 子图 2: 模拟信号对比 (发送 vs 接收) ---
-    plt.subplot(3, 1, 2)
-    plt.title("2. Physical Layer Signals: Clean Transmitted vs. Noisy Received")
-    
-    samples_per_bit = modem.samples_per_bit
-    t = np.arange(len(clean_signal))
-    
-    # 画发送信号
-    plt.plot(t, clean_signal, 'g--', linewidth=1.5, alpha=0.7, label='Tx Signal (Clean)')
-    # 画接收信号
-    plt.plot(t, noisy_signal[:len(t)], 'r-', linewidth=1, alpha=0.6, label='Rx Signal (Noisy + Attenuated)')
-    
-    # 画判决阈值线
-    threshold = 0 # 假设双极性信号阈值为0
-    plt.axhline(y=threshold, color='k', linestyle=':', label='Decision Threshold')
-    
-    plt.ylabel("Amplitude (Volts)")
-    plt.legend(loc='upper right')
-    plt.grid(True, alpha=0.3)
-    
-    # --- 子图 3: 解调判决逻辑 (采样点) ---
-    plt.subplot(3, 1, 3)
-    plt.title("3. Demodulation Logic: Sampling & Averaging")
-    
-    # 绘制接收信号
-    plt.plot(t, noisy_signal[:len(t)], 'lightgray', label='Raw Signal')
-    
-    # 模拟解调器的采样过程
-    # 我们计算每个比特周期的平均值，用点画出来
-    decoded_values = []
-    decoded_indices = []
-    
-    # 注意：这里我们假设已经完美同步（跳过前导码处理，直接按索引画图）
-    # 这里的处理是为了可视化，简化了 Modem 类中的同步搜索过程
-    preamble_len = 8 * samples_per_bit # 假设前导码长度
-    
-    for i in range(len(display_bits)):
-        # 加上前导码偏移
-        start = i * samples_per_bit + preamble_len
-        end = start + samples_per_bit
+    def test_parsing(self):
+        """测试消息解析"""
+        # 正常情况
+        msg = "GET /data.txt"
+        parsed = AppLayer.parse(msg)
+        self.assertEqual(parsed['type'], "GET")
+        self.assertEqual(parsed['content'], "/data.txt")
         
-        if end > len(noisy_signal): break
-        
-        # 计算该区间的平均值（积分）
-        segment = noisy_signal[start:end]
-        avg_val = np.mean(segment)
-        
-        # 记录中心点位置用于画图
-        center_idx = start + samples_per_bit / 2
-        decoded_values.append(avg_val)
-        decoded_indices.append(center_idx)
-        
-        # 判定颜色
-        color = 'green' if (avg_val > threshold and display_bits[i]==1) or (avg_val < threshold and display_bits[i]==0) else 'red'
-        marker = 'o' if display_bits[i] == 1 else 'x'
-        
-        plt.scatter(center_idx, avg_val, color=color, s=50, zorder=5)
-    
-    # 伪造一个图例项
-    plt.scatter([], [], color='green', label='Correctly Demodulated')
-    plt.scatter([], [], color='red', label='Demodulation Error')
-    
-    plt.xlabel("Sample Index")
-    plt.ylabel("Integrated Value")
-    plt.legend()
-    plt.grid(True)
-    
-    print("绘图完成。请查看弹出的窗口。")
-    plt.show()
+        # 异常情况 (只有指令没有内容)
+        msg_raw = "PING"
+        parsed_raw = AppLayer.parse(msg_raw)
+        self.assertEqual(parsed_raw['type'], "RAW")
+        self.assertEqual(parsed_raw['content'], "PING")
 
-def plot_retransmission_timeline():
-    """
-    可视化 2: 序列号与重传的时序图 (简化版)
-    这里我们不用真实的 simulation loop，而是手动生成数据来展示逻辑
-    """
+class TestReliability(unittest.TestCase):
+    """测试 Level 3 扩展: 可靠传输 (序列号与重传)"""
     
-    events = [
-        # (Time, Host, Event, Seq, Status)
-        (0.5, 'A', 'Send', 0, 'Success'),
-        (1.0, 'B', 'Receive', 0, 'Success'),
-        (1.2, 'B', 'Ack', 0, 'Success'),
-        (1.7, 'A', 'RxAck', 0, 'Success'),
-        
-        (2.5, 'A', 'Send', 1, 'Lost'), # 发送丢失
-        (5.5, 'A', 'Timeout', 1, 'Retransmit'), # 超时重传
-        (5.6, 'A', 'Send', 1, 'Success'), # 重传成功
-        (6.1, 'B', 'Receive', 1, 'Success'),
-        (6.3, 'B', 'Ack', 1, 'Lost'), # ACK 丢失
-        
-        (9.5, 'A', 'Timeout', 1, 'Retransmit'), # A 再次超时
-        (9.6, 'A', 'Send', 1, 'Duplicate'),
-        (10.1, 'B', 'Receive', 1, 'Duplicate'), # B 收到重复
-        (10.3, 'B', 'Ack', 1, 'Success'), # B 重发 ACK
-        (10.8, 'A', 'RxAck', 1, 'Success'),
-    ]
-    
-    fig, ax = plt.subplots(figsize=(12, 6))
-    
-    # 绘制 Host A 和 Host B 的轴线
-    ax.axhline(y=2, color='blue', linestyle='-', alpha=0.3)
-    ax.text(0, 2.1, 'Host A (Sender)', color='blue', fontweight='bold')
-    
-    ax.axhline(y=1, color='green', linestyle='-', alpha=0.3)
-    ax.text(0, 1.1, 'Host B (Receiver)', color='green', fontweight='bold')
-    
-    # 绘制事件
-    for time, host, event, seq, status in events:
-        y_pos = 2 if host == 'A' else 1
-        
-        marker = 'o'
-        color = 'gray'
-        label_text = f"{event}({seq})"
-        
-        if status == 'Success': color = 'blue' if host=='A' else 'green'
-        if status == 'Lost': color = 'red'; marker = 'x'
-        if status == 'Retransmit' or status == 'Timeout': color = 'orange'; marker = 'D'
-        if status == 'Duplicate': color = 'purple'
-        
-        ax.plot(time, y_pos, marker=marker, color=color, markersize=10)
-        
-        # 添加文字标注
-        offset = 0.15 if host == 'A' else -0.15
-        ax.text(time, y_pos + offset, label_text, ha='center', fontsize=9, color=color)
-        
-        # 画传输线 (箭头)
-        if event == 'Send' and status != 'Lost':
-            # 找到下一个 Receive
-            ax.arrow(time, 2, 0.4, -0.9, head_width=0.1, head_length=0.1, fc='blue', ec='blue', alpha=0.3)
-        if event == 'Ack' and status != 'Lost':
-            ax.arrow(time, 1, 0.4, 0.9, head_width=0.1, head_length=0.1, fc='green', ec='green', alpha=0.3)
+    def setUp(self):
+        # 使用理想信道进行逻辑测试 (不引入随机噪声干扰逻辑验证)
+        self.cable = Cable(length=10, attenuation=0, noise_level=0, debug_mode=False)
+        self.sender = Host(address=1, cable=self.cable)
+        self.receiver = Host(address=2, cable=self.cable)
 
-    plt.title("Sequence Number & Retransmission Timeline Visualization")
-    plt.xlabel("Simulation Time (arbitrary units)")
-    plt.yticks([]) 
-    plt.xlim(0, 12)
-    plt.ylim(0, 3)
-    plt.grid(True, axis='x', linestyle='--')
-    plt.show()
+    def test_sequence_number_increment(self):
+        """测试序列号是否自动递增"""
+        current_time = 0.0
+        
+        # 发送第一个包 (SEQ 0)
+        self.sender.send(target_address=2, message="First", current_time=current_time)
+        self.assertEqual(self.sender.next_seq, 1)
+        self.assertIn(0, self.sender.pending_acks)
+        
+        # 发送第二个包 (SEQ 1)
+        self.sender.send(target_address=2, message="Second", current_time=current_time)
+        self.assertEqual(self.sender.next_seq, 2)
+        self.assertIn(1, self.sender.pending_acks)
 
-if __name__ == "__main__":
-    # 运行两个可视化函数
-    print("1. Physical Layer Analysis")
-    plot_modulation_analysis()
+    def test_retransmission_logic_dynamic(self):
+        """
+        核心测试：动态模拟超时重传
+        (不使用预定义数据，完全跑真实逻辑)
+        """
+        sim_time = 0.0
+        message = "Critical Data"
+        
+        # 1. Host A 发送数据
+        # ------------------------------------------------
+        print("\n[Test] Host A sending data...")
+        self.sender.send(target_address=2, message=message, current_time=sim_time)
+        
+        # 验证: 已加入待确认列表
+        self.assertIn(0, self.sender.pending_acks)
+        # 获取刚存入的包对象以便后续比对
+        original_packet_obj = self.sender.pending_acks[0]['packet']
+        
+        # 2. 模拟丢包 (Simulate Packet Loss)
+        # ------------------------------------------------
+        print("[Test] Simulating packet loss (Receiver gets nothing)")
+        # 我们故意不调用 receiver.receive()，假装信号在 cable 中丢了
+        
+        # 3. 时间流逝，未达超时阈值
+        # ------------------------------------------------
+        sim_time += 1.0 # 过了 1秒 (阈值是 3.0秒)
+        retry_signals = self.sender.check_timeouts(sim_time)
+        
+        # 验证: 不应产生重传信号
+        self.assertEqual(len(retry_signals), 0, "Should not retransmit before timeout")
+        
+        # 4. 时间流逝，超过超时阈值 -> 触发重传
+        # ------------------------------------------------
+        sim_time += 3.0 # 总共过了 4秒 ( > 3.0)
+        print(f"[Test] Time is now {sim_time}, checking timeouts...")
+        retry_signals = self.sender.check_timeouts(sim_time)
+        
+        # 验证: 必须产生重传信号
+        self.assertTrue(len(retry_signals) > 0, "Should generate retransmission signal after timeout")
+        
+        # 5. 验证重传内容的正确性
+        # ------------------------------------------------
+        print("[Test] Verifying retransmitted signal content...")
+        retransmitted_signal = retry_signals[0]
+        
+        # 使用接收方的 Modem 解调这个重传信号
+        rx_bits = self.receiver.modem.demodulate(retransmitted_signal)
+        rx_packet = Packet.from_bits(rx_bits)
+        
+        self.assertIsNotNone(rx_packet)
+        self.assertEqual(rx_packet.seq, 0, "Retransmitted packet must keep original SEQ")
+        self.assertEqual(rx_packet.payload, message, "Payload must match original")
+        self.assertEqual(rx_packet.src, 1)
+
+    def test_ack_processing(self):
+        """测试 ACK 接收后清除重传队列"""
+        sim_time = 0.0
+        self.sender.send(target_address=2, message="Ping", current_time=sim_time)
+        
+        # 确保在队列中
+        self.assertIn(0, self.sender.pending_acks)
+        
+        # 模拟收到 ACK (构造一个 ACK 包并由 Sender 接收)
+        # 注意：这里我们不需要真的经过 Modem，直接注入逻辑或模拟完美接收
+        ack_packet = Packet(src=2, dst=1, payload_str="ACK", type='ACK', seq=0)
+        ack_bits = ack_packet.to_bits()
+        ack_signal = self.sender.modem.modulate(ack_bits)
+        
+        # Sender 接收 ACK
+        self.sender.receive(ack_signal)
+        
+        # 验证: 应该从待确认列表中移除
+        self.assertNotIn(0, self.sender.pending_acks, "ACK should remove item from pending list")
+
+    def test_duplicate_detection(self):
+        """测试接收端去重逻辑"""
+        # 构造一个数据包
+        packet = Packet(src=1, dst=2, payload_str="Dup Test", type='DATA', seq=5)
+        bits = packet.to_bits()
+        signal = self.sender.modem.modulate(bits)
+        
+        # 1. 第一次接收
+        self.receiver.receive(signal)
+        self.assertIn((1, 5), self.receiver.received_seqs, "First packet should be recorded")
+        
+        # 2. 第二次接收 (模拟重传到达)
+        # 捕获标准输出或检查内部状态变更通常比较复杂，
+        # 这里我们通过检查 received_seqs 集合的大小没变来验证没有重复处理
+        initial_set_size = len(self.receiver.received_seqs)
+        
+        self.receiver.receive(signal) # 再次接收
+        
+        self.assertEqual(len(self.receiver.received_seqs), initial_set_size, "Duplicate packet should not increase received set")
+
+class TestIntegration(unittest.TestCase):
+    """集成测试: 应用层 + 传输层 + 物理层"""
     
-    print("\n2. Retransmission Logic Demonstration")
-    plot_retransmission_timeline()
+    def test_http_get_scenario(self):
+        """模拟完整的 HTTP GET 交互"""
+        cable = Cable(length=10, attenuation=0, noise_level=0)
+        client = Host(1, cable)
+        server = Host(2, cable)
+        
+        # 1. Client 发送 GET 请求
+        req_str = AppLayer.create_request("GET", "/index.html")
+        tx_signal = client.send(2, req_str, current_time=0.0)
+        
+        # 2. 传输 (通过 Cable)
+        rx_signal = cable.transmit(tx_signal)
+        
+        # 3. Server 接收并处理
+        # Server.receive 会自动调用 _handle_app_layer 并打印日志
+        # 为了测试，我们不仅依赖打印，还要检查返回值中的 ACK 信号，
+        # 并且我们可以通过 "Hack" 检查 server 内部是否解析出了意图
+        
+        ack_signal, app_data = server.receive(rx_signal)
+        
+        # 验证 Server 收到了正确的数据
+        self.assertEqual(app_data, "GET /index.html")
+        
+        # 验证 Server 识别了请求 (通过手动调用 handle 验证逻辑，因为 receive 内部调用无法直接断言)
+        response = server._handle_app_layer(app_data)
+        self.assertTrue("200 OK" in response)
+        self.assertTrue("<html>" in response)
+
+if __name__ == '__main__':
+    unittest.main(verbosity=2)
