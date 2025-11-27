@@ -315,6 +315,9 @@ def run_simulation():
     
     def propagate_signal(sender, signal):
         """递归传播信号 (处理 ACK)"""
+        # 是否测试丢包逻辑  
+        is_retrans = False
+
         if signal is None: 
             return
             
@@ -322,7 +325,7 @@ def run_simulation():
         rx_signal = cable.transmit(signal)
         
         # 模拟特定时间段的丢包 (测试重传机制)
-        if 4.0 < sim_time < 6.0:
+        if 4.0 < sim_time < 6.0 and is_retrans:
             print(f"   >>> [CHANNEL FAILURE] Signal lost in transmission! (Time={sim_time})")
             return 
 
