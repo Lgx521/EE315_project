@@ -118,7 +118,7 @@ def visualize_three_schemes():
     
     # 保存或显示
     plt.tight_layout(rect=[0, 0, 1, 0.95])
-    print("✨ 可视化完成，正在显示图表...")
+    print("可视化完成，正在显示图表...")
     plt.show()
 
 if __name__ == "__main__":

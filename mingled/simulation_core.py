@@ -393,3 +393,4 @@ def run_simulation(target_scheme='ASK'):
 if __name__ == "__main__":
     run_simulation('BPSK')
     print(f"\nSimulation finished with {len(SIM_EVENTS)} events recorded.")
+

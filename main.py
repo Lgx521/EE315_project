@@ -357,13 +357,87 @@ class Host:
 # 6. 主程序 (参数化入口)
 # ============================================================================
 
+# def run_simulation(target_scheme='ASK'):
+#     """
+#     运行单次完整的仿真流程 (用于 visualization.py 调用)
+#     :param target_scheme: 指定调制方式 (ASK, FSK, BPSK)
+#     """
+#     global SIM_EVENTS
+#     # 如果作为独立脚本运行，清空事件；被调用时由调用者控制
+#     if __name__ == "__main__":
+#         SIM_EVENTS.clear()
+
+#     print(f"\n--- Starting Simulation (Scheme={target_scheme}) ---")
+    
+#     channel = WirelessChannel(length=50, attenuation=0.0, noise_level=0.1)
+#     client = Host(address=1, cable=channel, mod_scheme=target_scheme)
+#     server = Host(address=2, cable=channel, mod_scheme=target_scheme)
+    
+#     sim_state = {'time': 0.0}
+    
+#     def propagate(sender, signal, packet_obj):
+#         """递归传播信号"""
+#         # [Fix] 使用 is not None 检查，避免 numpy 数组真值歧义
+#         if signal is None or packet_obj is None: return
+#         t = sim_state['time']
+        
+#         # 模拟物理传输
+#         rx_signal = channel.transmit(signal)
+        
+#         # 丢包区间 (4.0s - 6.0s)
+#         is_loss_period = (4.0 < t < 6.0)
+        
+#         if is_loss_period:
+#             print(f"   >>> [CHANNEL FAILURE] Signal lost! (Time={t})")
+#             record_event(t, sender.address, "Send", packet_obj.seq, packet_obj.type, "Lost")
+#             return 
+
+#         # 记录成功发送
+#         record_event(t, sender.address, "Send", packet_obj.seq, packet_obj.type, "Success")
+
+#         receiver = server if sender == client else client
+        
+#         # 接收 (0.5s 延迟)
+#         resp_signal, _, resp_packet = receiver.receive(rx_signal, t + 0.5)
+        
+#         # ACK 回传
+#         # [Fix] 使用 is not None 检查
+#         if resp_signal is not None and resp_packet is not None:
+#             propagate(receiver, resp_signal, resp_packet)
+
+#     # 1. 正常请求
+#     print(f"[Time={sim_state['time']}] Scenario 1: Normal Request")
+#     sig, pkt = client.send(2, "GET /index.html", sim_state['time'])
+#     propagate(client, sig, pkt)
+    
+#     sim_state['time'] += 2.0 
+    
+#     # 2. 第二个正常请求
+#     print(f"[Time={sim_state['time']}] Scenario 2: Second Request")
+#     sig, pkt = client.send(2, "DATA 2", sim_state['time'])
+#     propagate(client, sig, pkt)
+
+#     sim_state['time'] += 3.0
+
+#     # 3. 丢包与重传
+#     print(f"[Time={sim_state['time']}] Scenario 3: Loss & Retransmission")
+#     # Time=5.0 -> Lost
+#     sig, pkt = client.send(2, "CRITICAL", sim_state['time']) 
+#     propagate(client, sig, pkt) 
+    
+#     print("... Waiting for timeout ...")
+#     sim_state['time'] += 4.0 # Time=9.0 -> Timeout
+    
+#     # 检查超时
+#     retries = client.check_timeouts(sim_state['time'])
+#     for sig, pkt in retries:
+#         propagate(client, sig, pkt)
+# ============================================================================
+# 6. 主程序 (参数化入口) - 修复时间递归问题
+# ============================================================================
+
 def run_simulation(target_scheme='ASK'):
-    """
-    运行单次完整的仿真流程 (用于 visualization.py 调用)
-    :param target_scheme: 指定调制方式 (ASK, FSK, BPSK)
-    """
     global SIM_EVENTS
-    # 如果作为独立脚本运行，清空事件；被调用时由调用者控制
     if __name__ == "__main__":
         SIM_EVENTS.clear()
 
@@ -375,65 +449,69 @@ def run_simulation(target_scheme='ASK'):
     
     sim_state = {'time': 0.0}
     
-    def propagate(sender, signal, packet_obj):
-        """递归传播信号"""
-        # [Fix] 使用 is not None 检查，避免 numpy 数组真值歧义
+    # [修改点 1] propagate 增加 current_t 参数
+    def propagate(sender, signal, packet_obj, current_t):
+        """递归传播信号，携带当前时间"""
         if signal is None or packet_obj is None: return
-        t = sim_state['time']
         
         # 模拟物理传输
         rx_signal = channel.transmit(signal)
         
         # 丢包区间 (4.0s - 6.0s)
-        is_loss_period = (4.0 < t < 6.0)
+        is_loss_period = (4.0 < current_t < 6.0)
         
         if is_loss_period:
-            print(f"   >>> [CHANNEL FAILURE] Signal lost! (Time={t})")
-            record_event(t, sender.address, "Send", packet_obj.seq, packet_obj.type, "Lost")
+            print(f"   >>> [CHANNEL FAILURE] Signal lost! (Time={current_t:.2f})")
+            record_event(current_t, sender.address, "Send", packet_obj.seq, packet_obj.type, "Lost")
             return 
 
         # 记录成功发送
-        record_event(t, sender.address, "Send", packet_obj.seq, packet_obj.type, "Success")
+        record_event(current_t, sender.address, "Send", packet_obj.seq, packet_obj.type, "Success")
 
         receiver = server if sender == client else client
         
-        # 接收 (0.5s 延迟)
-        resp_signal, _, resp_packet = receiver.receive(rx_signal, t + 0.5)
+        # 接收 (计算传播延迟 + 处理时间)
+        propagation_delay = 0.5
+        arrival_time = current_t + propagation_delay
         
-        # ACK 回传
-        # [Fix] 使用 is not None 检查
+        # Receiver 处理
+        resp_signal, _, resp_packet = receiver.receive(rx_signal, arrival_time)
+        
+        # ACK 回传 [关键修复点]
+        # 如果有回复，回复的时间应该是 arrival_time (即收到包的时刻)
         if resp_signal is not None and resp_packet is not None:
-            propagate(receiver, resp_signal, resp_packet)
+            propagate(receiver, resp_signal, resp_packet, arrival_time)
 
     # 1. 正常请求
     print(f"[Time={sim_state['time']}] Scenario 1: Normal Request")
     sig, pkt = client.send(2, "GET /index.html", sim_state['time'])
-    propagate(client, sig, pkt)
+    # [修改点 2] 调用时传入 sim_state['time']
+    propagate(client, sig, pkt, sim_state['time'])
     
     sim_state['time'] += 2.0 
     
     # 2. 第二个正常请求
     print(f"[Time={sim_state['time']}] Scenario 2: Second Request")
     sig, pkt = client.send(2, "DATA 2", sim_state['time'])
-    propagate(client, sig, pkt)
+    propagate(client, sig, pkt, sim_state['time'])
 
     sim_state['time'] += 3.0
 
     # 3. 丢包与重传
     print(f"[Time={sim_state['time']}] Scenario 3: Loss & Retransmission")
-    # Time=5.0 -> Lost
     sig, pkt = client.send(2, "CRITICAL", sim_state['time']) 
-    propagate(client, sig, pkt) 
+    propagate(client, sig, pkt, sim_state['time']) 
     
     print("... Waiting for timeout ...")
-    sim_state['time'] += 4.0 # Time=9.0 -> Timeout
+    sim_state['time'] += 4.0 # Time=9.0
     
     # 检查超时
     retries = client.check_timeouts(sim_state['time'])
     for sig, pkt in retries:
-        propagate(client, sig, pkt)
+        propagate(client, sig, pkt, sim_state['time'])
+
 
 if __name__ == "__main__":
     # 默认作为独立脚本运行时，跑一遍 ASK
-    run_simulation('FSK')
+    run_simulation('BPSK')
     print(f"\nSimulation finished with {len(SIM_EVENTS)} events recorded.")

@@ -24,3 +24,4 @@ class WirelessChannel(Cable):
         faded_signal = base_signal * fading_factor
         
         return faded_signal
+

@@ -20,7 +20,7 @@ def visualize_physical_layer_accurate():
     # 1. 配置与数据生成
     # ==============================
     # 噪声水平：设置一个中等噪声，既能看到波形畸变，又不会导致解调完全失败
-    NOISE_LEVEL = 2.5
+    NOISE_LEVEL = 1.2
     # 为了绘图清晰，我们截取展示的比特数
     DISPLAY_BITS = 60
 
